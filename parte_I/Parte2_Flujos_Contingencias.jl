@@ -140,4 +140,4 @@ CSV.write(joinpath(carpeta_contingencias, "voltajes_base_24h.csv"), df_voltajes_
 CSV.write(joinpath(carpeta_contingencias, "voltajes_contA_24h.csv"), df_voltajes_cont_a)
 CSV.write(joinpath(carpeta_contingencias, "voltajes_contB_24h.csv"), df_voltajes_cont_b)
 
-println("¡Archivos generados exitosamente en la carpeta '1.2.caso_contingencias'!")
+println("CSVs de contingencias guardados en '1.2.caso_contingencias'")

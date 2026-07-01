@@ -177,7 +177,7 @@ show(stdout, "text/plain", df_demanda)
 println("\n--- Resumen de Balance ---")
 for i in 1:24
     if !df_demanda.Satisfecha[i]
-        println("Hora $(i-1):00 -> ¡DESBALANCE DETECTADO! Demanda: $(df_demanda.Demanda_Total_MW[i]) MW vs Gen: $(df_demanda.Generacion_Total_MW[i]) MW")
+        println("Hora $(i-1):00 -> DESBALANCE DETECTADO. Demanda: $(df_demanda.Demanda_Total_MW[i]) MW vs Gen: $(df_demanda.Generacion_Total_MW[i]) MW")
     end
 end
 
@@ -220,4 +220,75 @@ end
 ruta_voltajes = joinpath(carpeta_resultados, "5_voltajes_resultados.csv")
 CSV.write(ruta_voltajes, df_voltajes)
 
-println("\n¡Simulación finalizada! Todos los CSVs generados correctamente en la carpeta '1.1.caso_base'.")
+println("\nCSVs del caso base guardados en la carpeta '1.1.caso_base'.")
+
+# ==============================================================================
+# PUNTO EXTRA: Análisis del caso histórico (Sin planta fotovoltaica)
+# ==============================================================================
+println("\n=== Iniciando simulación del Caso Histórico (con gen-3) ===")
+
+# 1. Cargar el sistema nuevamente desde cero
+sys_hist = System(file_path_static)
+
+# 2. Aplicar el 110% de carga y sincronizar max_active_power
+cargas_hist = collect(get_components(PowerLoad, sys_hist))
+for load in cargas_hist
+    set_active_power!(load, get_active_power(load) * λ_load)
+    set_reactive_power!(load, get_reactive_power(load) * λ_load)
+    
+    # Sincronización crucial para el TimeSeries
+    set_max_active_power!(load, get_active_power(load))
+    set_max_reactive_power!(load, get_reactive_power(load))
+end
+
+# 3. Aplicar TimeSeries a la demanda
+for load in cargas_hist
+    ta = TimeArray(timestamps, perfil_demanda_pu)
+    add_time_series!(sys_hist, load, SingleTimeSeries(name="max_active_power", data=ta))
+end
+transform_single_time_series!(sys_hist, 24, Hour(1))
+
+# 4. Definir las funciones de costo para los CINCO generadores
+# Al ordenar alfabéticamente, el orden será: gen-1, gen-2, gen-3, gen-4, gen-5
+gens_termicos_hist = sort!(collect(get_components(ThermalStandard, sys_hist)), by=x -> get_name(x))
+
+# Incorporamos los costos del gen-3 en la tercera posición
+# C3(P3) = 1500 + 6P3 + 0.02P3^2
+costos_fijos_hist = [2100.0, 7200.0, 1500.0, 6250.0, 2000.0] 
+costos_variables_hist = [(0.1, 10.0), (0.06, 7.0), (0.02, 6.0), (0.07, 8.0), (0.5, 60.0)] 
+
+for (i, g) in enumerate(gens_termicos_hist)
+    costo_cuadratico = VariableCost(costos_variables_hist[i])
+    costo_total = ThreePartCost(costo_cuadratico, costos_fijos_hist[i], 0.0, 0.0)
+    set_operation_cost!(g, costo_total)
+end
+
+# 5. Formular y resolver el modelo
+template_ed_hist = template_economic_dispatch()
+set_network_model!(template_ed_hist, NetworkModel(CopperPlatePowerModel, duals=[CopperPlateBalanceConstraint]))
+
+# Usamos el mismo optimizador (Ipopt) ya instanciado en el código principal
+modelo_ed_hist = DecisionModel(template_ed_hist, sys_hist, optimizer=optimizer, horizon=24)
+
+println("\nConstruyendo modelo histórico...")
+build!(modelo_ed_hist, output_dir=joinpath(carpeta_resultados, "ED_model_historico"))
+
+println("\nResolviendo despacho histórico...")
+solve!(modelo_ed_hist)
+
+# 6. Extracción y guardado del costo marginal (Lambda)
+res_hist = ProblemResults(modelo_ed_hist)
+duals_hist = read_duals(res_hist)
+lambda_pu_hist = duals_hist["CopperPlateBalanceConstraint__System"]
+
+# Generamos el DataFrame respetando el formato solicitado
+lambda_mw_hist = DataFrame(
+    DateTime = lambda_pu_hist.DateTime,
+    Lambda_MW = round.(lambda_pu_hist[!, 2] ./ S_base, digits=3)
+)
+
+# Guardamos el archivo en la misma carpeta del caso base
+ruta_lambda_hist = joinpath(carpeta_resultados, "0_lambda_historico_resultados.csv")
+CSV.write(ruta_lambda_hist, lambda_mw_hist)
+
+println("\nCaso histórico listo. Lambda guardado en '1.1.caso_base'.")
